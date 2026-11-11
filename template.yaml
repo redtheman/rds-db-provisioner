@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  rds-db-provisioner: creates an application database, login role and least-privilege
+  grants on an RDS PostgreSQL / MySQL / MariaDB instance, and stores the credentials
+  in Secrets Manager. Invoked on demand (CLI, Step Functions, CI pipeline).
+
+Parameters:
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets that can reach the RDS instances.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  DatabaseSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group on the RDS instances. An ingress rule from this Lambda is added to it.
+  SecretPrefix:
+    Type: String
+    Default: rds-app
+    AllowedPattern: "^[A-Za-z0-9_/+=.@-]+$"
+  SecretKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: Optional customer-managed KMS key for the application secrets.
+
+Conditions:
+  HasKms: !Not [!Equals [!Ref SecretKmsKeyArn, ""]]
+
+Resources:
+  FunctionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: rds-db-provisioner Lambda
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, DestinationSecurityGroupId: !Ref DatabaseSecurityGroupId, Description: PostgreSQL }
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, DestinationSecurityGroupId: !Ref DatabaseSecurityGroupId, Description: MySQL/MariaDB }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: AWS APIs via VPC endpoints or NAT }
+
+  PostgresIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref FunctionSecurityGroup
+      Description: rds-db-provisioner
+
+  MySQLIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref FunctionSecurityGroup
+      Description: rds-db-provisioner
+
+  ProvisionerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: provisioner.app.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 256
+      Timeout: 60
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds: [!Ref FunctionSecurityGroup]
+      Environment:
+        Variables:
+          SECRET_PREFIX: !Ref SecretPrefix
+          SECRET_KMS_KEY_ID: !Ref SecretKmsKeyArn
+      Policies:
+        - Statement:
+            - Sid: DescribeInstances
+              Effect: Allow
+              Action: rds:DescribeDBInstances
+              Resource: "*"
+            - Sid: ReadRdsManagedMasterSecrets
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!*"
+            - Sid: ManageAppSecrets
+              Effect: Allow
+              Action:
+                - secretsmanager:DescribeSecret
+                - secretsmanager:CreateSecret
+                - secretsmanager:PutSecretValue
+                - secretsmanager:RestoreSecret
+                - secretsmanager:TagResource
+              Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretPrefix}/*"
+            - !If
+              - HasKms
+              - Sid: UseSecretKey
+                Effect: Allow
+                Action: [kms:GenerateDataKey, kms:Decrypt]
+                Resource: !Ref SecretKmsKeyArn
+              - !Ref AWS::NoValue
+
+  ProvisionerLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProvisionerFunction}"
+      RetentionInDays: 365
+
+Outputs:
+  FunctionName:
+    Value: !Ref ProvisionerFunction
+  FunctionSecurityGroupId:
+    Value: !Ref FunctionSecurityGroup

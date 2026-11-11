@@ -1,0 +1,31 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: superpw }
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+      mariadb:
+        image: mariadb:10.11
+        env: { MARIADB_ROOT_PASSWORD: rootpw }
+        ports: ["3306:3306"]
+        options: --health-cmd "healthcheck.sh --connect" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: cfn-lint template.yaml
+      - name: Create RDS-like (non-superuser) master users
+        run: |
+          PGPASSWORD=superpw psql -h 127.0.0.1 -U postgres -c "CREATE ROLE rdsmaster LOGIN PASSWORD 'masterpw' CREATEROLE CREATEDB;"
+          mysql -h 127.0.0.1 -uroot -prootpw -e "CREATE USER 'admin'@'%' IDENTIFIED BY 'masterpw'; GRANT ALL PRIVILEGES ON *.* TO 'admin'@'%' WITH GRANT OPTION;"
+      - run: pytest -q
+        env:
+          PG_TEST: host=127.0.0.1 port=5432 user=rdsmaster password=masterpw
+          MYSQL_TEST: host=127.0.0.1 port=3306 user=admin password=masterpw

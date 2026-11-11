@@ -1,0 +1,1 @@
+{"db_instance": "crm-mariadb", "database": "crm", "role": "crm_worker", "access": "readwrite", "user_host": "10.0.%", "require_tls": true}

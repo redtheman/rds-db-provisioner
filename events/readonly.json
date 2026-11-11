@@ -1,0 +1,1 @@
+{"db_instance": "orders-prod", "database": "orders", "role": "bi_reader", "access": "readonly", "schemas": ["public"]}
